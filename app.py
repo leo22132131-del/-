@@ -12,11 +12,11 @@ file_dmaker = st.file_uploader("3. 上傳 dmaker (Excel)", type=["xlsx", "xls"])
 def extract_ba_code(text):
     if pd.isna(text): return ""
     s = str(text).upper().strip()
+    # 專為像 BD03[社區 這種帶有括號或文字的格式設計
     match = re.search(r'([A-Z]{2}\d{2})', s)
-    if match: return match.group(1)
-    match_any = re.search(r'([A-Z]{2}[-_\s]?\d{2})', s)
-    if match_any: return re.sub(r'[-_\s]', '', match_any.group(1))
-    return s
+    if match: 
+        return match.group(1)
+    return ""
 
 def clean_name(name):
     if pd.isna(name): return ""
@@ -43,12 +43,12 @@ def clean_date(val):
     if s.isdigit() and len(s) == 8: 
         return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
     
-    # 處理帶斜線/短線的日期 (如 115/7/1 或 2026/07/01)
+    # 處理帶斜線/短線的日期 (如 115/07/01 或 2026/07/01)
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
             y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            if y < 1000: y += 1911 # 民國轉西元
+            if y < 1000: y += 1911 # 民國年 115 轉 2026
             return f"{y:04d}-{m:02d}-{d:02d}"
         except: pass
         
@@ -85,7 +85,7 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. 整理 FA300 (包含服務數量與多種日期支援)
+        # 2. 整理 FA300
         df_fa300['date'] = df_fa300['服務日期'].apply(clean_date)
         df_fa300['code'] = df_fa300['服務項目'].apply(extract_ba_code)
         df_fa300['name'] = df_fa300['個案姓名'].apply(clean_name)
