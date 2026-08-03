@@ -21,31 +21,43 @@ def extract_ba_code(text):
 def clean_name(name):
     if pd.isna(name): return ""
     s = re.sub(r'\s+', '', str(name))
-    s = s.replace('鳯', '鳳') # 異體字修正
+    s = s.replace('鳯', '鳳')
     return s
 
 def clean_date(val):
-    if pd.isna(val) or str(val).strip() == "": return ""
+    if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == 'nan': 
+        return ""
     s = str(val).strip().split(' ')[0].split('.')[0]
+    
+    # 處理 Excel 數字日期 serial number (如 46194)
     if s.isdigit() and len(s) == 5:
         try: return pd.to_datetime(int(s), unit='D', origin='1899-12-30').strftime('%Y-%m-%d')
         except: pass
+    
+    # 處理民國年純數字 (如 1150701 -> 2026-07-01)
     if s.isdigit() and len(s) == 7:
         y = int(s[:3]) + 1911
-        return f"{y}-{s[3:5]}-{s[5:7]}"
-    if s.isdigit() and len(s) == 8: return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+        return f"{y:04d}-{int(s[3:5]):02d}-{int(s[5:7]):02d}"
+    
+    # 處理西元年純數字 (如 20260701 -> 2026-07-01)
+    if s.isdigit() and len(s) == 8: 
+        return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
+    
+    # 處理帶斜線/短線的日期 (如 115/7/1 或 2026/07/01)
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
             y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            if y < 1000: y += 1911
+            if y < 1000: y += 1911 # 民國轉西元
             return f"{y:04d}-{m:02d}-{d:02d}"
         except: pass
+        
     try:
         dt = pd.to_datetime(s)
         if dt.year < 1920: dt = dt.replace(year=dt.year + 1911)
         return dt.strftime('%Y-%m-%d')
-    except: return s
+    except: 
+        return s
 
 def find_column(df, possible_names):
     df.columns = [str(c).strip() for c in df.columns]
@@ -73,18 +85,17 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. 整理 FA300 (使用您提供的精準欄位名)
+        # 2. 整理 FA300 (包含服務數量與多種日期支援)
         df_fa300['date'] = df_fa300['服務日期'].apply(clean_date)
         df_fa300['code'] = df_fa300['服務項目'].apply(extract_ba_code)
         df_fa300['name'] = df_fa300['個案姓名'].apply(clean_name)
         
-        # 過濾作廢或無效狀態 (若有狀態欄位)
+        # 排除無效狀態
         if '狀態' in df_fa300.columns:
             df_fa300 = df_fa300[~df_fa300['狀態'].astype(str).str.contains('取消|作廢|刪除', na=False)]
             
         df_fa300 = df_fa300[df_fa300['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         
-        # 優先使用「服務數量」欄位，若沒有則計算筆數
         if '服務數量' in df_fa300.columns:
             df_fa300['qty'] = pd.to_numeric(df_fa300['服務數量'], errors='coerce').fillna(1)
             g_fa300 = df_fa300.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
@@ -127,7 +138,6 @@ if file_支審 and file_fa300 and file_dmaker:
 
         diff = diff[diff['date'] != '']
 
-        # 整理極簡輸出欄位
         diff_show = diff.rename(columns={
             'date': '服務日期',
             'name': '個案姓名',
@@ -141,7 +151,7 @@ if file_支審 and file_fa300 and file_dmaker:
         if len(diff_show) == 0:
             st.success("🎉 太棒了！每日服務項目與次數完全吻合！")
         else:
-            st.warning(f"⚠️ 發現 {len(diff_show)} 筆真正的紀錄差異：")
+            st.warning(f"⚠️ 發現 {len(diff_show)} 筆差異紀錄：")
             st.dataframe(diff_show, use_container_width=True)
 
             @st.cache_data
