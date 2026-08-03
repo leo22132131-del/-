@@ -18,7 +18,6 @@ def extract_ba_code(text):
 
 def clean_name(name):
     if pd.isna(name): return ""
-    # 去除所有半角/全角空白及特殊不可見字元
     s = re.sub(r'[\s\u3000\t\r\n]+', '', str(name))
     s = s.replace('鳯', '鳳')
     return s.strip()
@@ -27,10 +26,9 @@ def clean_date(val):
     if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == 'nan': 
         return ""
     
-    # 轉字串並只取前段日期部分（去除時間）
     s = str(val).strip().split(' ')[0].split('T')[0].split('.')[0]
     
-    # 1. 處理 Excel 數字序列 (如 46194)
+    # 1. 處理 Excel 數字序列
     if s.isdigit() and len(s) == 5:
         try: return pd.to_datetime(int(s), unit='D', origin='1899-12-30').strftime('%Y-%m-%d')
         except: pass
@@ -44,12 +42,12 @@ def clean_date(val):
     if s.isdigit() and len(s) == 8: 
         return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
     
-    # 4. 處理帶斜線/短線/點的日期 (如 115/07/01 或 115/7/1 或 2026-07-01)
+    # 4. 處理帶斜線/短線/點的日期 (如 115/07/01)
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
             y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            if y < 1000: y += 1911 # 民國轉西元
+            if y < 1000: y += 1911
             return f"{y:04d}-{m:02d}-{d:02d}"
         except: pass
         
@@ -59,6 +57,18 @@ def clean_date(val):
         return dt.strftime('%Y-%m-%d')
     except: 
         return s
+
+def smart_read_excel(file):
+    # 自動跳過表頭前的空白行
+    df = pd.read_excel(file)
+    for i in range(min(10, len(df))):
+        cols = [str(c) for c in df.columns]
+        if any('姓名' in c or '日期' in c or '項目' in c for c in cols):
+            return df
+        # 重新設定第一列為表頭
+        df.columns = df.iloc[0]
+        df = df[1:].reset_index(drop=True)
+    return df
 
 def find_column(df, possible_names):
     df.columns = [str(c).strip() for c in df.columns]
@@ -71,9 +81,9 @@ def find_column(df, possible_names):
 
 if file_支審 and file_fa300 and file_dmaker:
     try:
-        df_支審 = pd.read_excel(file_支審)
-        df_fa300 = pd.read_excel(file_fa300)
-        df_dmaker = pd.read_excel(file_dmaker)
+        df_支審 = smart_read_excel(file_支審)
+        df_fa300 = smart_read_excel(file_fa300)
+        df_dmaker = smart_read_excel(file_dmaker)
 
         # 1. 整理 支審
         col_d_支審 = find_column(df_支審, ['服務日期(請輸入7碼)', '服務日期', '費用日期', '日期'])
@@ -86,22 +96,21 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. 整理 FA300
-        col_d_fa = find_column(df_fa300, ['服務日期', '日期'])
-        col_c_fa = find_column(df_fa300, ['服務項目', '項目'])
-        col_n_fa = find_column(df_fa300, ['個案姓名', '姓名'])
+        # 2. 整理 FA300 (動態搜尋欄位)
+        col_d_fa = find_column(df_fa300, ['服務日期', '排班日期', '預定日期', '執行日期', '日期'])
+        col_c_fa = find_column(df_fa300, ['服務項目', '項目名稱', '項目代碼', '項目'])
+        col_n_fa = find_column(df_fa300, ['個案姓名', '姓名', '客戶名'])
 
         df_fa300['date'] = df_fa300[col_d_fa].apply(clean_date)
         df_fa300['code'] = df_fa300[col_c_fa].apply(extract_ba_code)
         df_fa300['name'] = df_fa300[col_n_fa].apply(clean_name)
         
-        # 排除無效狀態
         if '狀態' in df_fa300.columns:
             df_fa300 = df_fa300[~df_fa300['狀態'].astype(str).str.contains('取消|作廢|刪除', na=False)]
             
         df_fa300 = df_fa300[df_fa300['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         
-        col_q_fa = find_column(df_fa300, ['服務數量', '數量'])
+        col_q_fa = find_column(df_fa300, ['服務數量', '數量', '次數'])
         if col_q_fa:
             df_fa300['qty'] = pd.to_numeric(df_fa300[col_q_fa], errors='coerce').fillna(1)
             g_fa300 = df_fa300.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
