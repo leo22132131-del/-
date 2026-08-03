@@ -4,22 +4,34 @@ import io
 
 st.set_page_config(page_title="長照服務費用三方核對系統", layout="wide")
 st.title("📊 長照服務費用三方核對系統")
-st.write("請分別上傳 **支審資料**、**FA300報表** 與 **dmaker報表**，系統將自動進行交叉核對。")
+st.write("請分別上傳 **支審資料（日照+居家）**、**FA300報表** 與 **dmaker報表**，系統將自動進行交叉核對。")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    file_支審 = st.file_uploader("1. 上傳 支審資料 (.xls/.xlsx)", type=["xls", "xlsx"])
+    file_支審_日照 = st.file_uploader("1. 支審資料-日照 (.xls/.xlsx)", type=["xls", "xlsx"])
 with col2:
-    file_FA300 = st.file_uploader("2. 上傳 FA300 (.xls/.xlsx)", type=["xls", "xlsx"])
+    file_支審_居家 = st.file_uploader("2. 支審資料-居家 (.xls/.xlsx)", type=["xls", "xlsx"])
 with col3:
-    file_dmaker = st.file_uploader("3. 上傳 dmaker (.xls/.xlsx)", type=["xls", "xlsx"])
+    file_FA300 = st.file_uploader("3. FA300 (.xls/.xlsx)", type=["xls", "xlsx"])
+with col4:
+    file_dmaker = st.file_uploader("4. dmaker (.xls/.xlsx)", type=["xls", "xlsx"])
 
-if file_支審 and file_FA300 and file_dmaker:
-    st.success("三個檔案皆已上傳，開始進行自動比對...")
-    df1 = pd.read_excel(file_支審)
+# 只要有上傳 支審(至少一份)、FA300、dmaker 就能執行比對
+if (file_支審_日照 or file_支審_居家) and file_FA300 and file_dmaker:
+    st.success("檔案皆已成功上傳，開始進行自動比對...")
+
+    # 1. 讀取並合併支審資料 (支援只上傳其中一種或兩種都傳)
+    list_df_支審 = []
+    if file_支審_日照:
+        list_df_支審.append(pd.read_excel(file_支審_日照))
+    if file_支審_居家:
+        list_df_支審.append(pd.read_excel(file_支審_居家))
+
+    df1 = pd.concat(list_df_支審, ignore_index=True)
     df2 = pd.read_excel(file_FA300)
     df3 = pd.read_excel(file_dmaker)
 
+    # 2. 資料清洗與關鍵字提取
     df1["name"] = df1["個案姓名"].astype(str).str.strip().str.replace("鳯", "鳳")
     df1["code"] = df1["服務項目代碼"].astype(str).str.strip()
 
@@ -33,6 +45,7 @@ if file_支審 and file_FA300 and file_dmaker:
     df3["is_public"] = df3["品名"].str.contains("公費", na=False)
     df3["is_copay"] = df3["品名"].str.contains("部分負擔", na=False)
 
+    # 3. 彙整 dmaker
     c3_public = df3[df3["is_public"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_公費次數")
     c3_self = df3[df3["is_self_pay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_自費次數")
     c3_copay = df3[df3["is_copay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_部分負擔次數")
@@ -40,9 +53,11 @@ if file_支審 and file_FA300 and file_dmaker:
     dmaker_summary = pd.merge(c3_public, c3_self, on=["name", "code"], how="outer")
     dmaker_summary = pd.merge(dmaker_summary, c3_copay, on=["name", "code"], how="outer").fillna(0)
 
+    # 4. 彙整 支審 與 FA300
     c1 = df1.groupby(["name", "code"]).size().reset_index(name="支審次數")
     c2 = df2.groupby(["name", "code"]).size().reset_index(name="FA300次數")
 
+    # 5. 三方 Cross Merge
     final = pd.merge(c1, c2, on=["name", "code"], how="outer")
     final = pd.merge(final, dmaker_summary, on=["name", "code"], how="outer").fillna(0)
 
@@ -55,6 +70,7 @@ if file_支審 and file_FA300 and file_dmaker:
 
     diff_df = final[final["公費異常"] | final["總數異常"]]
 
+    # 6. 結果面板
     st.subheader("📌 比對結果總覽")
     m1, m2, m3 = st.columns(3)
     m1.metric("總核對長照項目組數", len(final))
@@ -66,8 +82,9 @@ if file_支審 and file_FA300 and file_dmaker:
         st.success("🎉 太棒了！所有長照項目的公費與自費數量 100% 完全吻合！")
     else:
         st.error(f"⚠️ 發現 {len(diff_df)} 筆項目不吻合，請查看下方明細：")
-        st.dataframe(diff_df[["name", "code", "支審次數", "FA300次數", "dmaker_公費次數", "dmaker_自費次數", "dmaker_公自費合計"]])
+        st.dataframe(diff_show := diff_df[["name", "code", "支審次數", "FA300次數", "dmaker_公費次數", "dmaker_自費次數", "dmaker_公自費合計"]])
 
+    # 7. 下載報表匯出
     st.subheader("📥 下載完整核對結果")
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
