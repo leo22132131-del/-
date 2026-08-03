@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import re
 
 st.title("長照居家服務核對系統（精準按日期核對）")
-st.write("請上傳三個 Excel 報表，系統將自動修正日期格式並按【姓名 + 服務日期 + 服務代碼】比對。")
+st.write("請上傳三個 Excel 報表，系統將自動按【姓名 + 服務日期 + 服務代碼】精準比對。")
 
 file_支審 = st.file_uploader("1. 上傳 支審資料 (Excel)", type=["xlsx", "xls"])
 file_fa300 = st.file_uploader("2. 上傳 FA300 (Excel)", type=["xlsx", "xls"])
@@ -15,48 +16,55 @@ def extract_ba_code(text):
     match = re.search(r'([A-Z]{2}\d{2})', str(text).upper())
     return match.group(1) if match else str(text).strip()
 
-def clean_date_smart(date_val):
-    """精準處理台灣長照各種日期格式（包含 1150702, 115/07/02, 2026/07/02, Excel 時間戳記等）"""
-    if pd.isna(date_val):
+def clean_date_universal(val):
+    """全通用日期轉換函數，解析各種長照系統日期格式"""
+    if pd.isna(val) or str(val).strip() == "":
         return ""
     
-    val_str = str(date_val).strip().split(' ')[0] # 去掉時間部分 (如 00:00:00)
-    val_str = val_str.split('.')[0] # 去掉小數點 (如 .0)
-    
-    # 情況 A：純數字 7 碼民國年 (例如: 1130702 或 1150702)
-    if len(val_str) == 7 and val_str.isdigit():
-        y = int(val_str[:3]) + 1911
-        m = val_str[3:5]
-        d = val_str[5:7]
-        return f"{y}-{m}-{d}"
+    # 1. 先處理 pandas/datetime 原生物件
+    if isinstance(val, (pd.Timestamp, datetime)):
+        return val.strftime('%Y-%m-%d')
         
-    # 情況 B：純數字 6 碼民國年 (例如: 990702)
-    if len(val_str) == 6 and val_str.isdigit():
-        y = int(val_str[:2]) + 1911
-        m = val_str[2:4]
-        d = val_str[4:6]
-        return f"{y}-{m}-{d}"
+    s = str(val).strip().split(' ')[0].split('.')[0] # 拿掉時間與小數點
+    
+    # 2. 如果是 Excel 序列號 (如 45505 這種五位數字)
+    if s.isdigit() and len(s) == 5:
+        try:
+            dt = pd.to_datetime(int(s), unit='D', origin='1899-12-30')
+            return dt.strftime('%Y-%m-%d')
+        except:
+            pass
 
-    # 情況 C：純數字 8 碼西元年 (例如: 20240702)
-    if len(val_str) == 8 and val_str.isdigit():
-        return f"{val_str[:4]}-{val_str[4:6]}-{val_str[6:8]}"
+    # 3. 民國年純數字：7碼 (如 1130801 -> 2024-08-01)
+    if s.isdigit() and len(s) == 7:
+        y = int(s[:3]) + 1911
+        return f"{y}-{s[3:5]}-{s[5:7]}"
 
-    # 情況 D：帶有符號的民國年 (例如: 113/7/2, 115-07-02, 113.07.02)
-    m = re.match(r'^(\d{2,3})[/.-](\d{1,2})[/.-](\d{1,2})', val_str)
-    if m:
-        y, month, d = m.groups()
-        if int(y) < 1000:  # 代表是民國年
-            y = int(y) + 1911
-        return f"{int(y):04d}-{int(month):02d}-{int(d):02d}"
+    # 4. 西元年純數字：8碼 (如 20240801 -> 2024-08-01)
+    if s.isdigit() and len(s) == 8:
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
-    # 情況 E：一般西元年
+    # 5. 帶分隔符號 (如 113/8/1, 113.8.1, 113-08-01, 2024/08/01)
+    parts = re.split(r'[/.-]', s)
+    if len(parts) == 3:
+        try:
+            y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+            if y < 1000:  # 民國年
+                y += 1911
+            return f"{y:04d}-{m:02d}-{d:02d}"
+        except:
+            pass
+
+    # 6. 其他標準文字日期
     try:
-        dt = pd.to_datetime(val_str)
-        if dt.year < 1920: # 避免轉成 0115年 等異常年份
+        dt = pd.to_datetime(s)
+        if dt.year < 1920:
             dt = dt.replace(year=dt.year + 1911)
         return dt.strftime('%Y-%m-%d')
     except:
-        return val_str
+        return s
+
+from datetime import datetime
 
 def clean_name(name):
     if pd.isna(name):
@@ -78,7 +86,7 @@ if file_支審 and file_fa300 and file_dmaker:
         col_code_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
         col_name_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
 
-        df_支審['date'] = df_支審[col_date_支審].apply(clean_date_smart)
+        df_支審['date'] = df_支審[col_date_支審].apply(clean_date_universal)
         df_支審['code'] = df_支審[col_code_支審].apply(extract_ba_code)
         df_支審['clean_name'] = df_支審[col_name_支審].apply(clean_name)
         df_支審 = df_支審[~df_支審[col_code_支審].astype(str).str.contains('QA1385', na=False)]
@@ -91,7 +99,7 @@ if file_支審 and file_fa300 and file_dmaker:
         col_code_fa300 = find_column(df_fa300, ['服務項目', '服務項目名稱', '服務項目代碼'])
         col_name_fa300 = find_column(df_fa300, ['個案姓名', '姓名', '客戶名'])
 
-        df_fa300['date'] = df_fa300[col_date_fa300].apply(clean_date_smart)
+        df_fa300['date'] = df_fa300[col_date_fa300].apply(clean_date_universal)
         df_fa300['code'] = df_fa300[col_code_fa300].apply(extract_ba_code)
         df_fa300['clean_name'] = df_fa300[col_name_fa300].apply(clean_name)
         
@@ -103,7 +111,7 @@ if file_支審 and file_fa300 and file_dmaker:
         col_code_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
         col_name_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
 
-        df_dmaker['date'] = df_dmaker[col_date_dmaker].apply(clean_date_smart)
+        df_dmaker['date'] = df_dmaker[col_date_dmaker].apply(clean_date_universal)
         df_dmaker['code'] = df_dmaker[col_code_dmaker].apply(extract_ba_code)
         df_dmaker['clean_name'] = df_dmaker[col_name_dmaker].apply(clean_name)
 
@@ -123,8 +131,8 @@ if file_支審 and file_fa300 and file_dmaker:
         result = merged.rename(columns={'clean_name': '個案姓名', 'date': '服務日期', 'code': '代碼(BA/BB)'})
         result = result[['個案姓名', '服務日期', '代碼(BA/BB)', '支審次數', 'FA300次數', 'dmaker數量']]
 
-        # 排除日期無效或空白的項目
-        result = result[result['服務日期'] != '1970-01-01']
+        # 排除日期無效的欄位
+        result = result[~result['服務日期'].isin(['1970-01-01', ''])]
         diff = result[(result['支審次數'] != result['FA300次數']) | (result['支審次數'] != result['dmaker數量'])]
 
         st.subheader("📊 核對結果總覽")
@@ -145,6 +153,19 @@ if file_支審 and file_fa300 and file_dmaker:
                 file_name='長照BA_BB碼異常明細.csv',
                 mime='text/csv',
             )
+
+        # 頁面下方排錯小工具：顯示前 5 筆解析出來的日期
+        with st.expander("🔍 點此檢查：系統解析出來的日期格式"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.write("**支審解析日期範例**")
+                st.write(df_支審[['clean_name', 'date', 'code']].head())
+            with col2:
+                st.write("**FA300解析日期範例**")
+                st.write(df_fa300[['clean_name', 'date', 'code']].head())
+            with col3:
+                st.write("**dmaker解析日期範例**")
+                st.write(df_dmaker[['clean_name', 'date', 'code']].head())
 
     except Exception as e:
         st.error(f"資料處理時發生錯誤：{e}")
