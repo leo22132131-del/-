@@ -3,7 +3,7 @@ import pandas as pd
 import re
 
 st.set_page_config(page_title="長照居家服務核對系統", layout="wide")
-st.title("長照居家服務核對系統（極簡日期+項目核對）")
+st.title("長照居家服務核對系統（極簡版 ＋ 智慧判斷次數）")
 
 file_支審 = st.file_uploader("1. 上傳 支審資料 (Excel)", type=["xlsx", "xls"])
 file_fa300 = st.file_uploader("2. 上傳 FA300 (Excel)", type=["xlsx", "xls"])
@@ -18,7 +18,9 @@ def extract_ba_code(text):
 
 def clean_name(name):
     if pd.isna(name): return ""
-    return re.sub(r'\s+', '', str(name))
+    s = re.sub(r'\s+', '', str(name))
+    s = s.replace('鳯', '鳳') # 修正異體字
+    return s
 
 def clean_date(val):
     if pd.isna(val) or str(val).strip() == "": return ""
@@ -67,24 +69,40 @@ if file_支審 and file_fa300 and file_dmaker:
         col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
         col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
         col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
+        col_t_dmaker = find_column(df_dmaker, ['費用類別', '身分別', '公自費', '類別'])
 
-        # 整理資料
+        # 1. 整理 支審
         df_支審['date'] = df_支審[col_d_支審].apply(clean_date)
         df_支審['code'] = df_支審[col_c_支審].apply(extract_ba_code)
         df_支審['name'] = df_支審[col_n_支審].apply(clean_name)
         df_支審 = df_支審[~df_支審[col_c_支審].astype(str).str.contains('QA1385', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
+        # 2. 整理 FA300
         df_fa300['date'] = df_fa300[col_d_fa300].apply(clean_date)
         df_fa300['code'] = df_fa300[col_c_fa300].apply(extract_ba_code)
         df_fa300['name'] = df_fa300[col_n_fa300].apply(clean_name)
         g_fa300 = df_fa300.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
 
+        # 3. 整理 dmaker (加入智慧判斷邏輯)
         df_dmaker['date'] = df_dmaker[col_d_dmaker].apply(clean_date)
         df_dmaker['code'] = df_dmaker[col_c_dmaker].apply(extract_ba_code)
         df_dmaker['name'] = df_dmaker[col_n_dmaker].apply(clean_name)
-        # 按簽到筆數計算次數 (避免刷卡紀錄算成2倍)
-        g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).size().reset_index(name='dmaker次數')
+
+        def get_real_dmaker_count(group):
+            # 檢查這筆資料是否有「自費」相關字眼
+            is_self_pay = group[col_c_dmaker].astype(str).str.contains('自費|全額|超過').any()
+            if col_t_dmaker:
+                if group[col_t_dmaker].astype(str).str.contains('自費|全額|超過').any():
+                    is_self_pay = True
+            
+            raw_count = len(group)
+            if is_self_pay:
+                return raw_count       # 自費：不除以2，有幾筆算幾次
+            else:
+                return raw_count // 2  # 公費：除以2取整數 (2筆算1次，1筆算0次代表異常)
+
+        g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(get_real_dmaker_count).reset_index(name='dmaker次數')
 
         # 合併三表
         merged = pd.merge(g_支審, g_fa300, on=['name', 'date', 'code'], how='outer')
@@ -102,7 +120,7 @@ if file_支審 and file_fa300 and file_dmaker:
 
         diff = diff[diff['date'] != '']
 
-        # 整理最終輸出的極簡欄位
+        # 整理極簡輸出欄位
         diff_show = diff.rename(columns={
             'date': '服務日期',
             'name': '個案姓名',
@@ -116,7 +134,7 @@ if file_支審 and file_fa300 and file_dmaker:
         if len(diff_show) == 0:
             st.success("🎉 太棒了！每日服務項目與次數完全吻合！")
         else:
-            st.warning(f"⚠️ 發現 {len(diff_show)} 筆不相符的紀錄：")
+            st.warning(f"⚠️ 發現 {len(diff_show)} 筆真正的紀錄差異：")
             st.dataframe(diff_show, use_container_width=True)
 
             @st.cache_data
