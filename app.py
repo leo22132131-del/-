@@ -28,17 +28,7 @@ def clean_date(val):
     
     s = str(val).strip().split(' ')[0].split('T')[0].split('.')[0]
     
-    if s.isdigit() and len(s) == 5:
-        try: return pd.to_datetime(int(s), unit='D', origin='1899-12-30').strftime('%Y-%m-%d')
-        except: pass
-    
-    if s.isdigit() and len(s) == 7:
-        y = int(s[:3]) + 1911
-        return f"{y:04d}-{int(s[3:5]):02d}-{int(s[5:7]):02d}"
-    
-    if s.isdigit() and len(s) == 8: 
-        return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
-    
+    # 處理帶斜線/短線/點的日期 (如 115/07/01 或 2026-07-01)
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
@@ -46,57 +36,66 @@ def clean_date(val):
             if y < 1000: y += 1911
             return f"{y:04d}-{m:02d}-{d:02d}"
         except: pass
+
+    if s.isdigit() and len(s) == 7:
+        y = int(s[:3]) + 1911
+        return f"{y:04d}-{int(s[3:5]):02d}-{int(s[5:7]):02d}"
+    
+    if s.isdigit() and len(s) == 8: 
+        return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
         
     try:
         dt = pd.to_datetime(s)
         if dt.year < 1920: dt = dt.replace(year=dt.year + 1911)
         return dt.strftime('%Y-%m-%d')
     except: 
-        return s
+        return ""
 
 def read_excel_smart(file):
-    # 讀取 Excel，若沒有表頭則以 header=None 處理
     df_first = pd.read_excel(file, nrows=5)
     cols_str = "".join([str(c) for c in df_first.columns])
-    
-    # 判斷第一列是否為資料（包含身分證或日期格式）
-    if re.search(r'[A-Z]\d{9}', cols_str) or re.search(r'\d{3}/\d{2}/\d{2}', cols_str):
+    if re.search(r'[A-Z]\d{9}', cols_str) or re.search(r'\d{3}/', cols_str):
         df = pd.read_excel(file, header=None)
     else:
         df = pd.read_excel(file)
     return df
 
 def process_fa300(df):
-    # 自動分析欄位內容
     name_col, date_col, code_col, qty_col = None, None, None, None
     
+    # 針對沒有標頭的 FA300 進行欄位精準掃瞄
     for col in df.columns:
         col_str = str(col).strip()
-        sample_vals = df[col].dropna().astype(str).head(10).tolist()
-        sample_text = " ".join(sample_vals)
+        vals = df[col].dropna().astype(str).head(10).tolist()
         
-        # 尋找姓名欄
-        if '姓名' in col_str or (not name_col and any(len(v) in [2, 3, 4] and not re.search(r'\d', v) for v in sample_vals)):
-            if not name_col: name_col = col
-            
-        # 尋找日期欄
-        if '日期' in col_str or any(re.search(r'\d{3}[/.-]\d{2}[/.-]\d{2}', v) or re.search(r'\d{8}', v) for v in sample_vals):
-            date_col = col
-            
-        # 尋找服務項目代碼欄
-        if '項目' in col_str or any(re.search(r'[A-Z]{2}\d{2}', v) for v in sample_vals):
-            code_col = col
+        # 1. 真正的日期欄：裡面必須有 '/' 或 '-'，且絕對不能含有英文字母
+        if not date_col:
+            if any('/' in v or '-' in v for v in vals) and not any(re.search(r'[A-Za-z]', v) for v in vals):
+                date_col = col
+                
+        # 2. 姓名欄：2-4個字的純中文
+        if not name_col:
+            if any(len(v) in [2, 3, 4] and not re.search(r'[\d\w/.-]', v) for v in vals):
+                name_col = col
 
-        # 尋找數量欄
+        # 3. 服務項目欄：含有 BA/BB/BD/GA 等項目代碼
+        if not code_col:
+            if any(re.search(r'[A-Z]{2}\d{2}', v) for v in vals):
+                code_col = col
+
+        # 4. 數量欄：標頭有數量，或是純數字1
         if '數量' in col_str or '次數' in col_str:
             qty_col = col
 
-    # 清理資料
+    # 如果沒找到標頭，預設 FA300 的欄位順序：0:姓名, 2:日期, 3:項目, 4:數量
+    if not date_col: date_col = 2 if 2 in df.columns else df.columns[2]
+    if not name_col: name_col = 0 if 0 in df.columns else df.columns[0]
+    if not code_col: code_col = 3 if 3 in df.columns else df.columns[3]
+
     df['date'] = df[date_col].apply(clean_date)
     df['code'] = df[code_col].apply(extract_ba_code)
     df['name'] = df[name_col].apply(clean_name)
     
-    # 過濾有效長照代碼
     df = df[df['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
     
     if qty_col:
@@ -131,7 +130,7 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. 整理 FA300 (使用智慧內容辨識)
+        # 2. 整理 FA300
         g_fa300 = process_fa300(df_fa300)
 
         # 3. 整理 dmaker
