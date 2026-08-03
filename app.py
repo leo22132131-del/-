@@ -20,7 +20,7 @@ def extract_ba_code(text):
 def clean_name(name):
     if pd.isna(name): return ""
     s = re.sub(r'\s+', '', str(name))
-    s = s.replace('鳯', '鳳') # 異體字修正
+    s = s.replace('鳯', '鳳') # 修正異體字
     return s
 
 def clean_date(val):
@@ -50,6 +50,10 @@ def find_column(df, possible_names):
     df.columns = [str(c).strip() for c in df.columns]
     for name in possible_names:
         if name in df.columns: return name
+    # 模糊匹配
+    for col in df.columns:
+        for p in possible_names:
+            if p in col: return col
     return None
 
 if file_支審 and file_fa300 and file_dmaker:
@@ -63,41 +67,43 @@ if file_支審 and file_fa300 and file_dmaker:
         col_c_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
         col_n_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
 
-        col_d_fa300 = find_column(df_fa300, ['服務日期', '執行日期', '日期', '預定日期'])
-        col_c_fa300 = find_column(df_fa300, ['服務項目', '服務項目名稱', '服務項目代碼', '項目代碼'])
+        col_d_fa300 = find_column(df_fa300, ['服務日期', '預定日期', '執行日期', '排班日期', '日期'])
+        col_c_fa300 = find_column(df_fa300, ['服務項目', '服務項目名稱', '服務項目代碼', '項目代碼', '項目'])
         col_n_fa300 = find_column(df_fa300, ['個案姓名', '姓名', '客戶名'])
 
         col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
         col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
         col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
-        col_t_dmaker = find_column(df_dmaker, ['簽到時間', '服務時間', '時間', '刷卡時間'])
 
         # 1. 整理 支審
         df_支審['date'] = df_支審[col_d_支審].apply(clean_date)
         df_支審['code'] = df_支審[col_c_支審].apply(extract_ba_code)
         df_支審['name'] = df_支審[col_n_支審].apply(clean_name)
-        df_支審 = df_支審[df_支審['code'].str.contains(r'^[A-Z]{2}\d{2}', na=False)] # 只留長照標準碼 (如 BA01, BD03)
+        # 排除 QA 碼與非長照碼
+        df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
         # 2. 整理 FA300
         df_fa300['date'] = df_fa300[col_d_fa300].apply(clean_date)
         df_fa300['code'] = df_fa300[col_c_fa300].apply(extract_ba_code)
         df_fa300['name'] = df_fa300[col_n_fa300].apply(clean_name)
-        df_fa300 = df_fa300[df_fa300['code'].str.contains(r'^[A-Z]{2}\d{2}', na=False)]
+        df_fa300 = df_fa300[df_fa300['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_fa300 = df_fa300.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
 
-        # 3. 整理 dmaker (準確計算服務次數)
+        # 3. 整理 dmaker
         df_dmaker['date'] = df_dmaker[col_d_dmaker].apply(clean_date)
         df_dmaker['code'] = df_dmaker[col_c_dmaker].apply(extract_ba_code)
         df_dmaker['name'] = df_dmaker[col_n_dmaker].apply(clean_name)
-        df_dmaker = df_dmaker[df_dmaker['code'].str.contains(r'^[A-Z]{2}\d{2}', na=False)]
+        df_dmaker = df_dmaker[df_dmaker['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
 
         def calculate_dmaker_count(group):
+            # 檢查是否為自費項目
+            is_self = group[col_c_dmaker].astype(str).str.contains('自費|全額|超過').any()
             raw_len = len(group)
-            if raw_len <= 2:
-                return 1
-            # 如果超過2筆，按小時/時間段或整除計算
-            return max(1, round(raw_len / 2))
+            if is_self:
+                return raw_len
+            else:
+                return max(1, round(raw_len / 2))
 
         g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(calculate_dmaker_count).reset_index(name='dmaker次數')
 
