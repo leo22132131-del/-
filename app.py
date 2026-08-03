@@ -3,7 +3,7 @@ import pandas as pd
 import re
 
 st.set_page_config(page_title="長照居家服務核對系統", layout="wide")
-st.title("長照居家服務核對系統（極簡版 ＋ 智慧判斷次數）")
+st.title("長照居家服務核對系統（極簡日期+項目核對）")
 
 file_支審 = st.file_uploader("1. 上傳 支審資料 (Excel)", type=["xlsx", "xls"])
 file_fa300 = st.file_uploader("2. 上傳 FA300 (Excel)", type=["xlsx", "xls"])
@@ -13,13 +13,14 @@ def extract_ba_code(text):
     if pd.isna(text): return ""
     s = str(text).upper().strip()
     match = re.search(r'([A-Z]{2}[-_\s]?\d{2})', s)
-    if match: return re.sub(r'[-_\s]', '', match.group(1))
+    if match: 
+        return re.sub(r'[-_\s]', '', match.group(1))
     return s
 
 def clean_name(name):
     if pd.isna(name): return ""
     s = re.sub(r'\s+', '', str(name))
-    s = s.replace('鳯', '鳳') # 修正異體字
+    s = s.replace('鳯', '鳳') # 異體字修正
     return s
 
 def clean_date(val):
@@ -62,47 +63,43 @@ if file_支審 and file_fa300 and file_dmaker:
         col_c_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
         col_n_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
 
-        col_d_fa300 = find_column(df_fa300, ['服務日期', '執行日期', '日期'])
-        col_c_fa300 = find_column(df_fa300, ['服務項目', '服務項目名稱', '服務項目代碼'])
+        col_d_fa300 = find_column(df_fa300, ['服務日期', '執行日期', '日期', '預定日期'])
+        col_c_fa300 = find_column(df_fa300, ['服務項目', '服務項目名稱', '服務項目代碼', '項目代碼'])
         col_n_fa300 = find_column(df_fa300, ['個案姓名', '姓名', '客戶名'])
 
         col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
         col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
         col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
-        col_t_dmaker = find_column(df_dmaker, ['費用類別', '身分別', '公自費', '類別'])
+        col_t_dmaker = find_column(df_dmaker, ['簽到時間', '服務時間', '時間', '刷卡時間'])
 
         # 1. 整理 支審
         df_支審['date'] = df_支審[col_d_支審].apply(clean_date)
         df_支審['code'] = df_支審[col_c_支審].apply(extract_ba_code)
         df_支審['name'] = df_支審[col_n_支審].apply(clean_name)
-        df_支審 = df_支審[~df_支審[col_c_支審].astype(str).str.contains('QA1385', na=False)]
+        df_支審 = df_支審[df_支審['code'].str.contains(r'^[A-Z]{2}\d{2}', na=False)] # 只留長照標準碼 (如 BA01, BD03)
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
         # 2. 整理 FA300
         df_fa300['date'] = df_fa300[col_d_fa300].apply(clean_date)
         df_fa300['code'] = df_fa300[col_c_fa300].apply(extract_ba_code)
         df_fa300['name'] = df_fa300[col_n_fa300].apply(clean_name)
+        df_fa300 = df_fa300[df_fa300['code'].str.contains(r'^[A-Z]{2}\d{2}', na=False)]
         g_fa300 = df_fa300.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
 
-        # 3. 整理 dmaker (加入智慧判斷邏輯)
+        # 3. 整理 dmaker (準確計算服務次數)
         df_dmaker['date'] = df_dmaker[col_d_dmaker].apply(clean_date)
         df_dmaker['code'] = df_dmaker[col_c_dmaker].apply(extract_ba_code)
         df_dmaker['name'] = df_dmaker[col_n_dmaker].apply(clean_name)
+        df_dmaker = df_dmaker[df_dmaker['code'].str.contains(r'^[A-Z]{2}\d{2}', na=False)]
 
-        def get_real_dmaker_count(group):
-            # 檢查這筆資料是否有「自費」相關字眼
-            is_self_pay = group[col_c_dmaker].astype(str).str.contains('自費|全額|超過').any()
-            if col_t_dmaker:
-                if group[col_t_dmaker].astype(str).str.contains('自費|全額|超過').any():
-                    is_self_pay = True
-            
-            raw_count = len(group)
-            if is_self_pay:
-                return raw_count       # 自費：不除以2，有幾筆算幾次
-            else:
-                return raw_count // 2  # 公費：除以2取整數 (2筆算1次，1筆算0次代表異常)
+        def calculate_dmaker_count(group):
+            raw_len = len(group)
+            if raw_len <= 2:
+                return 1
+            # 如果超過2筆，按小時/時間段或整除計算
+            return max(1, round(raw_len / 2))
 
-        g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(get_real_dmaker_count).reset_index(name='dmaker次數')
+        g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(calculate_dmaker_count).reset_index(name='dmaker次數')
 
         # 合併三表
         merged = pd.merge(g_支審, g_fa300, on=['name', 'date', 'code'], how='outer')
