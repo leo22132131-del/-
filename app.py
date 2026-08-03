@@ -28,6 +28,7 @@ def clean_date(val):
     
     s = str(val).strip().split(' ')[0].split('T')[0].split('.')[0]
     
+    # 處理民國或西元斜線日期 (如 115/07/01 或 2026/07/01)
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
@@ -50,72 +51,6 @@ def clean_date(val):
     except: 
         return ""
 
-# 診斷專用：顯示 FA300 讀取結果
-if file_fa300:
-    st.subheader("🔍 FA300 檔案預覽診斷")
-    try:
-        df_preview = pd.read_excel(file_fa300)
-        st.write("【預設讀取 (有表頭)】欄位名稱：", list(df_preview.columns))
-        st.dataframe(df_preview.head(3))
-    except Exception as e:
-        st.error(f"預覽失敗: {e}")
-
-def read_excel_smart(file):
-    file.seek(0)
-    df_first = pd.read_excel(file, nrows=5)
-    cols_str = "".join([str(c) for c in df_first.columns])
-    
-    # 若表頭包含身分證或斜線日期，說明第一列就是資料（無標頭）
-    if re.search(r'[A-Za-z]\d{9}', cols_str) or re.search(r'\d{3}/', cols_str):
-        file.seek(0)
-        df = pd.read_excel(file, header=None)
-    else:
-        file.seek(0)
-        df = pd.read_excel(file)
-    return df
-
-def process_fa300(df):
-    # 嘗試標準欄位名稱
-    col_d, col_n, col_c, col_q = None, None, None, None
-    
-    for c in df.columns:
-        cs = str(c).strip()
-        if '日期' in cs: col_d = c
-        elif '姓名' in cs or '個案' in cs: col_n = c
-        elif '項目' in cs or '碼' in cs: col_c = c
-        elif '數量' in cs or '次數' in cs: col_q = c
-
-    # 如果沒找到文字標頭（無標頭檔案），依據內容特徵嚴格指派
-    if not col_d or not col_n or not col_c:
-        for c in df.columns:
-            vals = df[c].dropna().astype(str).head(15).tolist()
-            # 日期：必須包含 '/' 或 '-' 且不能有英文字母 (避免抓到身分證)
-            if not col_d and any('/' in v or '-' in v for v in vals) and not any(re.search(r'[A-Za-z]', v) for v in vals):
-                col_d = c
-            # 姓名：中文長度 2~4
-            elif not col_n and any(len(v) in [2, 3, 4] and not re.search(r'[\d\w/.-]', v) for v in vals):
-                col_n = c
-            # 代碼：含有 BA/BB/BD/GA 等
-            elif not col_c and any(re.search(r'[A-Z]{2}\d{2}', v) for v in vals):
-                col_c = c
-
-    # 備用保險：如果還是抓不到，硬性按照常見的位置 (0:姓名, 2:日期, 3:項目)
-    if not col_n: col_n = df.columns[0]
-    if not col_d: col_d = df.columns[2] if len(df.columns) > 2 else df.columns[0]
-    if not col_c: col_c = df.columns[3] if len(df.columns) > 3 else df.columns[0]
-
-    df['date'] = df[col_d].apply(clean_date)
-    df['code'] = df[col_c].apply(extract_ba_code)
-    df['name'] = df[col_n].apply(clean_name)
-    
-    df = df[df['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
-    
-    if col_q:
-        df['qty'] = pd.to_numeric(df[col_q], errors='coerce').fillna(1)
-        return df.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
-    else:
-        return df.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
-
 def find_column(df, possible_names):
     df.columns = [str(c).strip() for c in df.columns]
     for name in possible_names:
@@ -125,13 +60,40 @@ def find_column(df, possible_names):
             if p in col: return col
     return None
 
+def process_fa300_exact(df):
+    # 優先使用你提供的精確欄位名稱
+    col_n = find_column(df, ['個案姓名', '姓名'])
+    col_d = find_column(df, ['服務日期', '日期'])
+    col_c = find_column(df, ['服務項目', '項目'])
+    col_q = find_column(df, ['服務數量', '數量', '次數'])
+
+    # 如果沒找到文字，退回使用固定位置 (0:姓名, 2:日期, 4:服務項目, 6:服務數量)
+    cols = df.columns
+    if not col_n: col_n = cols[0]
+    if not col_d: col_d = cols[2]
+    if not col_c: col_c = cols[4]
+    if not col_q: col_q = cols[6] if len(cols) > 6 else None
+
+    df['date'] = df[col_d].apply(clean_date)
+    df['code'] = df[col_c].apply(extract_ba_code)
+    df['name'] = df[col_n].apply(clean_name)
+    
+    # 篩選長照服務碼
+    df = df[df['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
+    
+    if col_q:
+        df['qty'] = pd.to_numeric(df[col_q], errors='coerce').fillna(1)
+        return df.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
+    else:
+        return df.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
+
 if file_支審 and file_fa300 and file_dmaker:
     try:
-        df_支審 = read_excel_smart(file_支審)
-        df_fa300 = read_excel_smart(file_fa300)
-        df_dmaker = read_excel_smart(file_dmaker)
+        df_支審 = pd.read_excel(file_支審)
+        df_fa300 = pd.read_excel(file_fa300)
+        df_dmaker = pd.read_excel(file_dmaker)
 
-        # 1. 支審
+        # 1. 整理 支審
         col_d_支審 = find_column(df_支審, ['服務日期(請輸入7碼)', '服務日期', '費用日期', '日期'])
         col_c_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
         col_n_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
@@ -142,10 +104,10 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. FA300
-        g_fa300 = process_fa300(df_fa300)
+        # 2. 整理 FA300 (使用精準欄位對應)
+        g_fa300 = process_fa300_exact(df_fa300)
 
-        # 3. dmaker
+        # 3. 整理 dmaker
         col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
         col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
         col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
@@ -165,7 +127,7 @@ if file_支審 and file_fa300 and file_dmaker:
 
         g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(calculate_dmaker_count).reset_index(name='dmaker次數')
 
-        # 合併
+        # 合併三表
         merged = pd.merge(g_支審, g_fa300, on=['name', 'date', 'code'], how='outer')
         merged = pd.merge(merged, g_dmaker, on=['name', 'date', 'code'], how='outer')
 
@@ -173,6 +135,7 @@ if file_支審 and file_fa300 and file_dmaker:
         merged['FA300次數'] = merged['FA300次數'].fillna(0).astype(int)
         merged['dmaker次數'] = merged['dmaker次數'].fillna(0).astype(int)
 
+        # 篩選異常資料
         diff = merged[
             (merged['支審次數'] != merged['FA300次數']) | 
             (merged['支審次數'] != merged['dmaker次數'])
