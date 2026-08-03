@@ -1,153 +1,83 @@
+echo 'import pandas as pd
 import streamlit as st
-import pandas as pd
-import re
-from datetime import datetime, timedelta
+import io
 
-st.set_page_config(page_title="長照居家服務精準核對系統", layout="wide")
-st.title("長照居家服務核對系統（以支審為基準）")
-st.write("以【支審資料】為申報基準，精準比對 FA300 與 dmaker 的核對狀況。")
+st.set_page_config(page_title="長照服務費用三方核對系統", layout="wide")
+st.title("📊 長照服務費用三方核對系統")
+st.write("請分別上傳 **支審資料**、**FA300報表** 與 **dmaker報表**，系統將自動進行交叉核對。")
 
-file_支審 = st.file_uploader("1. 上傳 支審資料 (Excel)", type=["xlsx", "xls"])
-file_fa300 = st.file_uploader("2. 上傳 FA300 (Excel)", type=["xlsx", "xls"])
-file_dmaker = st.file_uploader("3. 上傳 dmaker (Excel)", type=["xlsx", "xls"])
+col1, col2, col3 = st.columns(3)
+with col1:
+    file_支審 = st.file_uploader("1. 上傳 支審資料 (.xls/.xlsx)", type=["xls", "xlsx"])
+with col2:
+    file_FA300 = st.file_uploader("2. 上傳 FA300 (.xls/.xlsx)", type=["xls", "xlsx"])
+with col3:
+    file_dmaker = st.file_uploader("3. 上傳 dmaker (.xls/.xlsx)", type=["xls", "xlsx"])
 
-date_tolerance = st.checkbox("開啟「日期 ±1 天彈性核對」（若居服員常有跨夜打卡或隔天補登情況建議勾選）", value=False)
+if file_支審 and file_FA300 and file_dmaker:
+    st.success("三個檔案皆已上傳，開始進行自動比對...")
+    df1 = pd.read_excel(file_支審)
+    df2 = pd.read_excel(file_FA300)
+    df3 = pd.read_excel(file_dmaker)
 
-def extract_ba_code(text):
-    if pd.isna(text): return ""
-    match = re.search(r'([A-Z]{2}\d{2})', str(text).upper())
-    return match.group(1) if match else str(text).strip()
+    df1["name"] = df1["個案姓名"].astype(str).str.strip().str.replace("鳯", "鳳")
+    df1["code"] = df1["服務項目代碼"].astype(str).str.strip()
 
-def clean_date_universal(val):
-    if pd.isna(val) or str(val).strip() == "": return ""
-    if isinstance(val, (pd.Timestamp, datetime)): return val.strftime('%Y-%m-%d')
-    s = str(val).strip().split(' ')[0].split('.')[0]
-    if s.isdigit() and len(s) == 5:
-        try: return pd.to_datetime(int(s), unit='D', origin='1899-12-30').strftime('%Y-%m-%d')
-        except: pass
-    if s.isdigit() and len(s) == 7: return f"{int(s[:3])+1911}-{s[3:5]}-{s[5:7]}"
-    if s.isdigit() and len(s) == 8: return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    parts = re.split(r'[/.-]', s)
-    if len(parts) == 3:
-        try:
-            y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            if y < 1000: y += 1911
-            return f"{y:04d}-{m:02d}-{d:02d}"
-        except: pass
-    try:
-        dt = pd.to_datetime(s)
-        if dt.year < 1920: dt = dt.replace(year=dt.year + 1911)
-        return dt.strftime('%Y-%m-%d')
-    except: return s
+    df2["name"] = df2["個案姓名"].astype(str).str.strip().str.replace("鳯", "鳳")
+    df2["code"] = df2["服務項目"].astype(str).str.extract(r"([A-Z]{2}\d{2})")[0]
 
-def clean_name(name):
-    if pd.isna(name): return ""
-    return re.sub(r'\s+', '', str(name))
+    df3["name"] = df3["客戶名"].astype(str).str.strip().str.replace("鳯", "鳳")
+    df3["code"] = df3["品名"].astype(str).str.extract(r"([A-Z]{2}\d{2}|QA1385)")[0]
 
-def find_column(df, possible_names):
-    df.columns = [str(c).strip() for c in df.columns]
-    for name in possible_names:
-        if name in df.columns: return name
-    return None
+    df3["is_self_pay"] = df3["品名"].str.contains("自費", na=False)
+    df3["is_public"] = df3["品名"].str.contains("公費", na=False)
+    df3["is_copay"] = df3["品名"].str.contains("部分負擔", na=False)
 
-if file_支審 and file_fa300 and file_dmaker:
-    try:
-        df_支審 = pd.read_excel(file_支審)
-        df_fa300 = pd.read_excel(file_fa300)
-        df_dmaker = pd.read_excel(file_dmaker)
+    c3_public = df3[df3["is_public"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_公費次數")
+    c3_self = df3[df3["is_self_pay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_自費次數")
+    c3_copay = df3[df3["is_copay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_部分負擔次數")
 
-        # 找尋關鍵欄位
-        col_d_支審 = find_column(df_支審, ['服務日期(請輸入7碼)', '服務日期', '費用日期', '日期'])
-        col_c_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
-        col_n_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
+    dmaker_summary = pd.merge(c3_public, c3_self, on=["name", "code"], how="outer")
+    dmaker_summary = pd.merge(dmaker_summary, c3_copay, on=["name", "code"], how="outer").fillna(0)
 
-        col_d_fa300 = find_column(df_fa300, ['服務日期', '執行日期', '日期'])
-        col_c_fa300 = find_column(df_fa300, ['服務項目', '服務項目名稱', '服務項目代碼'])
-        col_n_fa300 = find_column(df_fa300, ['個案姓名', '姓名', '客戶名'])
+    c1 = df1.groupby(["name", "code"]).size().reset_index(name="支審次數")
+    c2 = df2.groupby(["name", "code"]).size().reset_index(name="FA300次數")
 
-        col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
-        col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
-        col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
+    final = pd.merge(c1, c2, on=["name", "code"], how="outer")
+    final = pd.merge(final, dmaker_summary, on=["name", "code"], how="outer").fillna(0)
 
-        # 資料清理
-        for df, col_d, col_c, col_n in [(df_支審, col_d_支審, col_c_支審, col_n_支審),
-                                        (df_fa300, col_d_fa300, col_c_fa300, col_n_fa300),
-                                        (df_dmaker, col_d_dmaker, col_c_dmaker, col_n_dmaker)]:
-            df['date'] = df[col_d].apply(clean_date_universal)
-            df['code'] = df[col_c].apply(extract_ba_code)
-            df['clean_name'] = df[col_n].apply(clean_name)
+    for col in ["支審次數", "FA300次數", "dmaker_公費次數", "dmaker_自費次數", "dmaker_部分負擔次數"]:
+        final[col] = final[col].astype(int)
 
-        # 排除 QA1385 等無效代碼
-        df_支審 = df_支審[~df_支審[col_c_支審].astype(str).str.contains('QA1385', na=False)]
-        df_支審 = df_支審[df_支審['code'] != ""]
+    final["dmaker_公自費合計"] = final["dmaker_公費次數"] + final["dmaker_自費次數"]
+    final["公費異常"] = final["FA300次數"] != final["dmaker_公費次數"]
+    final["總數異常"] = (final["支審次數"] != final["dmaker_公自費合計"]) & (final["code"] != "QA1385")
 
-        # 分組計算數量
-        g_支審 = df_支審.groupby(['clean_name', 'date', 'code']).size().reset_index(name='支審申報數')
-        g_fa300 = df_fa300.groupby(['clean_name', 'date', 'code']).size().reset_index(name='FA300紀錄數')
-        
-        if '數量' in df_dmaker.columns:
-            g_dmaker = df_dmaker.groupby(['clean_name', 'date', 'code'])['數量'].sum().reset_index(name='dmaker刷卡數')
-        else:
-            g_dmaker = df_dmaker.groupby(['clean_name', 'date', 'code']).size().reset_index(name='dmaker刷卡數')
+    diff_df = final[final["公費異常"] | final["總數異常"]]
 
-        # 以支審資料為主體開始比對
-        results = []
-        for _, row in g_支審.iterrows():
-            name = row['clean_name']
-            date_str = row['date']
-            code = row['code']
-            target_qty = row['支審申報數']
+    st.subheader("📌 比對結果總覽")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("總核對長照項目組數", len(final))
+    m2.metric("完全吻合組數", len(final) - len(diff_df))
+    m3.metric("不吻合/待確認組數", len(diff_df), delta_color="inverse")
 
-            # 比對 FA300
-            fa_match = g_fa300[(g_fa300['clean_name'] == name) & (g_fa300['date'] == date_str) & (g_fa300['code'] == code)]
-            fa_qty = fa_match['FA300紀錄數'].sum() if len(fa_match) > 0 else 0
+    if len(diff_df) == 0:
+        st.balloons()
+        st.success("🎉 太棒了！所有長照項目的公費與自費數量 100% 完全吻合！")
+    else:
+        st.error(f"⚠️ 發現 {len(diff_df)} 筆項目不吻合，請查看下方明細：")
+        st.dataframe(diff_df[["name", "code", "支審次數", "FA300次數", "dmaker_公費次數", "dmaker_自費次數", "dmaker_公自費合計"]])
 
-            # 比對 dmaker (支援 ±1 天彈性比對)
-            if date_tolerance and date_str != "":
-                try:
-                    dt = datetime.strptime(date_str, '%Y-%m-%d')
-                    valid_dates = [(dt + timedelta(days=i)).strftime('%Y-%m-%d') for i in [-1, 0, 1]]
-                    dm_match = g_dmaker[(g_dmaker['clean_name'] == name) & (g_dmaker['date'].isin(valid_dates)) & (g_dmaker['code'] == code)]
-                except:
-                    dm_match = g_dmaker[(g_dmaker['clean_name'] == name) & (g_dmaker['date'] == date_str) & (g_dmaker['code'] == code)]
-            else:
-                dm_match = g_dmaker[(g_dmaker['clean_name'] == name) & (g_dmaker['date'] == date_str) & (g_dmaker['code'] == code)]
-            
-            dm_qty = dm_match['dmaker刷卡數'].sum() if len(dm_match) > 0 else 0
+    st.subheader("📥 下載完整核對結果")
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        final.to_excel(writer, sheet_name="完整比對表", index=False)
+        if len(diff_df) > 0:
+            diff_df.to_excel(writer, sheet_name="異常明細表", index=False)
 
-            # 判斷結果狀態
-            status = []
-            if fa_qty != target_qty: status.append(f"FA300不符(差{fa_qty - target_qty:+}次)")
-            if dm_qty != target_qty: status.append(f"dmaker不符(差{dm_qty - target_qty:+}次)")
-
-            results.append({
-                '個案姓名': name,
-                '申報日期': date_str,
-                '服務代碼': code,
-                '支審申報數': target_qty,
-                'FA300次數': fa_qty,
-                'dmaker次數': dm_qty,
-                '異常說明': '；'.join(status) if status else '完全符合'
-            })
-
-        df_result = pd.DataFrame(results)
-        df_diff = df_result[df_result['異常說明'] != '完全符合']
-
-        st.subheader("📊 核對結果分析")
-        col1, col2 = st.columns(2)
-        col1.metric("支審申報總筆數", len(df_result))
-        col2.metric("發現異常筆數", len(df_diff), delta_color="inverse")
-
-        if len(df_diff) == 0:
-            st.success("🎉 太棒了！支審申報的所有服務項目在 FA300 與 dmaker 均完全吻合！")
-        else:
-            st.warning(f"⚠️ 發現 {len(df_diff)} 筆申報資料存在紀錄不相符的情況：")
-            st.dataframe(df_diff, use_container_width=True)
-
-            @st.cache_data
-            def convert_df(df): return df.to_csv(index=False).encode('utf-8-sig')
-
-            st.download_button("📥 下載支審異常對照明細表 (CSV)", convert_df(df_diff), "長照支審申報異常核對表.csv", "text/csv")
-
-    except Exception as e:
-        st.error(f"資料核對失敗，請檢查檔案格式與欄位名稱：{e}")
+    st.download_button(
+        label="下載核對結果 Excel 報表",
+        data=buffer.getvalue(),
+        file_name="長照費用核對報告.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )' > ~/Downloads/app.py
