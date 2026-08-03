@@ -36,7 +36,8 @@ if file_支審 and file_fa300 and file_dmaker:
     try:
         # 1. 讀取與處理 支審資料
         df_支審 = pd.read_excel(file_支審)
-        col_date_支審 = find_column(df_支審, ['服務日期', '費用日期', '日期'])
+        # 加上「服務日期(請輸入7碼)」
+        col_date_支審 = find_column(df_支審, ['服務日期(請輸入7碼)', '服務日期', '費用日期', '日期'])
         col_code_支審 = find_column(df_支審, ['服務項目名稱', '服務項目代碼', '服務項目', '項目代碼'])
         col_name_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
 
