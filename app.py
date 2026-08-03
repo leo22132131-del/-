@@ -26,9 +26,15 @@ def clean_date(val):
     if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == 'nan': 
         return ""
     
+    # 若本身就是 pandas Timestamp 或 datetime 物件
+    if isinstance(val, (pd.Timestamp, pd.DatetimeIndex)):
+        y = val.year
+        if y < 1920: y += 1911
+        return f"{y:04d}-{val.month:02d}-{val.day:02d}"
+
     s = str(val).strip().split(' ')[0].split('T')[0].split('.')[0]
     
-    # 處理民國或西元斜線日期 (如 115/07/01 或 2026/07/01)
+    # 處理帶斜線/短線的日期 (如 115/07/01 或 2026-07-01)
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
@@ -60,32 +66,49 @@ def find_column(df, possible_names):
             if p in col: return col
     return None
 
-def process_fa300_exact(df):
-    # 優先使用你提供的精確欄位名稱
+# FA300 診斷與處理函數
+def process_fa300_debug(df):
     col_n = find_column(df, ['個案姓名', '姓名'])
     col_d = find_column(df, ['服務日期', '日期'])
     col_c = find_column(df, ['服務項目', '項目'])
     col_q = find_column(df, ['服務數量', '數量', '次數'])
 
-    # 如果沒找到文字，退回使用固定位置 (0:姓名, 2:日期, 4:服務項目, 6:服務數量)
     cols = df.columns
     if not col_n: col_n = cols[0]
     if not col_d: col_d = cols[2]
     if not col_c: col_c = cols[4]
     if not col_q: col_q = cols[6] if len(cols) > 6 else None
 
-    df['date'] = df[col_d].apply(clean_date)
-    df['code'] = df[col_c].apply(extract_ba_code)
-    df['name'] = df[col_n].apply(clean_name)
-    
-    # 篩選長照服務碼
-    df = df[df['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
+    df_clean = pd.DataFrame()
+    df_clean['原始姓名'] = df[col_n]
+    df_clean['name'] = df[col_n].apply(clean_name)
+    df_clean['原始日期'] = df[col_d]
+    df_clean['date'] = df[col_d].apply(clean_date)
+    df_clean['原始項目'] = df[col_c]
+    df_clean['code'] = df[col_c].apply(extract_ba_code)
     
     if col_q:
-        df['qty'] = pd.to_numeric(df[col_q], errors='coerce').fillna(1)
-        return df.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
+        df_clean['qty'] = pd.to_numeric(df[col_q], errors='coerce').fillna(1)
     else:
-        return df.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
+        df_clean['qty'] = 1
+
+    return df_clean
+
+# 如果有上傳 FA300，直接把轉出來的結果顯示在螢幕最上方
+if file_fa300:
+    st.subheader("🔍 FA300 讀取測試診斷")
+    try:
+        df_raw_fa = pd.read_excel(file_fa300)
+        df_fa_parsed = process_fa300_debug(df_raw_fa)
+        
+        st.write("FA300 前 5 筆解析出來的結果：")
+        st.dataframe(df_fa_parsed.head(5))
+        
+        # 篩選有效長照碼後的筆數
+        valid_fa = df_fa_parsed[df_fa_parsed['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
+        st.info(f"FA300 總列數：{len(df_raw_fa)} 列，成功抓到長照碼別的筆數：{len(valid_fa)} 筆")
+    except Exception as e:
+        st.error(f"FA300 讀取發生錯誤：{e}")
 
 if file_支審 and file_fa300 and file_dmaker:
     try:
@@ -93,7 +116,7 @@ if file_支審 and file_fa300 and file_dmaker:
         df_fa300 = pd.read_excel(file_fa300)
         df_dmaker = pd.read_excel(file_dmaker)
 
-        # 1. 整理 支審
+        # 1. 支審
         col_d_支審 = find_column(df_支審, ['服務日期(請輸入7碼)', '服務日期', '費用日期', '日期'])
         col_c_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
         col_n_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
@@ -104,10 +127,12 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. 整理 FA300 (使用精準欄位對應)
-        g_fa300 = process_fa300_exact(df_fa300)
+        # 2. FA300
+        df_fa_parsed = process_fa300_debug(df_fa300)
+        df_fa_valid = df_fa_parsed[df_fa_parsed['code'].str.contains(r'^(BA|BB|BC|BD|GA|GB)', na=False)]
+        g_fa300 = df_fa_valid.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
 
-        # 3. 整理 dmaker
+        # 3. dmaker
         col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
         col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
         col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
@@ -127,7 +152,7 @@ if file_支審 and file_fa300 and file_dmaker:
 
         g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(calculate_dmaker_count).reset_index(name='dmaker次數')
 
-        # 合併三表
+        # 合併
         merged = pd.merge(g_支審, g_fa300, on=['name', 'date', 'code'], how='outer')
         merged = pd.merge(merged, g_dmaker, on=['name', 'date', 'code'], how='outer')
 
@@ -135,7 +160,6 @@ if file_支審 and file_fa300 and file_dmaker:
         merged['FA300次數'] = merged['FA300次數'].fillna(0).astype(int)
         merged['dmaker次數'] = merged['dmaker次數'].fillna(0).astype(int)
 
-        # 篩選異常資料
         diff = merged[
             (merged['支審次數'] != merged['FA300次數']) | 
             (merged['支審次數'] != merged['dmaker次數'])
@@ -158,11 +182,6 @@ if file_支審 and file_fa300 and file_dmaker:
         else:
             st.warning(f"⚠️ 發現 {len(diff_show)} 筆差異紀錄：")
             st.dataframe(diff_show, use_container_width=True)
-
-            @st.cache_data
-            def convert_df(df): return df.to_csv(index=False).encode('utf-8-sig')
-
-            st.download_button("📥 下載異常明細 (CSV)", convert_df(diff_show), "每日服務項目異常明細.csv", "text/csv")
 
     except Exception as e:
         st.error(f"資料處理失敗：{e}")
