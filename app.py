@@ -46,7 +46,7 @@ if submit_btn:
         df2 = pd.read_excel(file_FA300)
         df3 = pd.read_excel(file_dmaker)
 
-        # 2. 清理代碼（自動去除尾綴 -1, -2）
+        # 2. 代碼與姓名清洗（自動去除尾綴 -1, -2）
         def clean_code(text):
             if pd.isna(text): return ""
             s = str(text).strip()
@@ -61,21 +61,24 @@ if submit_btn:
         df3["name"] = df3["客戶名"].astype(str).str.strip().str.replace("鳯", "鳳")
         df3["code"] = df3["品名"].astype(str).str.extract(r"([A-Z]{2}\d{2}|QA1385)")[0].apply(clean_code)
 
-        # 3. 分類 dmaker 服務類型（避免公費與部分負擔重複採計）
+        # 3. 分離 dmaker 統計類別
         df3["is_self_pay"] = df3["品名"].str.contains("自費", na=False)
-        # 若品名有「公費」，直接採計為公費；若無「公費」但有「部分負擔」（如 BA 居家碼），採計為公費
         df3["is_public"] = df3["品名"].str.contains("公費", na=False)
         df3["is_copay"] = df3["品名"].str.contains("部分負擔", na=False)
 
-        # 若同時有公費記錄，優先使用公費記錄；否則使用部分負擔記錄
-        df3_public_only = df3[df3["is_public"]]
-        df3_copay_only = df3[df3["is_copay"] & (~df3["is_public"])]
-        df3_public_combined = pd.concat([df3_public_only, df3_copay_only], ignore_index=True)
-
-        c3_public = df3_public_combined.groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_公費次數")
+        # 計算各個別次數
+        c3_public = df3[df3["is_public"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_公費次數")
+        c3_copay = df3[df3["is_copay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_部分負擔次數")
         c3_self = df3[df3["is_self_pay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_自費次數")
 
-        dmaker_summary = pd.merge(c3_public, c3_self, on=["name", "code"], how="outer").fillna(0)
+        # 合併 dmaker 統計
+        dmaker_summary = pd.merge(c3_public, c3_copay, on=["name", "code"], how="outer").fillna(0)
+        dmaker_summary = pd.merge(dmaker_summary, c3_self, on=["name", "code"], how="outer").fillna(0)
+
+        # 💡 精確邏輯：如果有公費就用公費次數；如果沒有公費(為0)才用部分負擔次數！
+        dmaker_summary["dmaker_公費次數"] = dmaker_summary.apply(
+            lambda r: r["dmaker_公費次數"] if r["dmaker_公費次數"] > 0 else r["dmaker_部分負擔次數"], axis=1
+        )
 
         # 4. 彙整 支審 與 FA300
         c1 = df1.groupby(["name", "code"]).size().reset_index(name="支審次數")
