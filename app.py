@@ -1,173 +1,40 @@
 import streamlit as st
 import pandas as pd
-import re
 
-st.set_page_config(page_title="長照居家服務核對系統", layout="wide")
-st.title("長照居家服務核對系統（極簡日期+項目核對）")
+st.set_page_config(page_title="FA300 專用排錯器", layout="wide")
+st.title("🕵️‍♂️ FA300 抓鬼除錯診斷")
 
-file_支審 = st.file_uploader("1. 上傳 支審資料 (Excel)", type=["xlsx", "xls"])
-file_fa300 = st.file_uploader("2. 上傳 FA300 (Excel)", type=["xlsx", "xls"])
-file_dmaker = st.file_uploader("3. 上傳 dmaker (Excel)", type=["xlsx", "xls"])
+file_fa300 = st.file_uploader("請上傳您的 FA300 檔案 (Excel)", type=["xlsx", "xls"])
 
-# 允許所有長照、喘息與短照服務碼別 (BA, BB, BC, BD, GA, GB, GC, SA, SB, SC 等)
-VALID_CODE_PATTERN = r'^(B[A-D]|G[A-C]|S[A-C])'
-
-def extract_ba_code(text):
-    if pd.isna(text): return ""
-    s = str(text).upper().strip()
-    match = re.search(r'([A-Z]{2}\d{2})', s)
-    if match: return match.group(1)
-    return ""
-
-def clean_name(name):
-    if pd.isna(name): return ""
-    s = re.sub(r'[\s\u3000\t\r\n]+', '', str(name))
-    s = s.replace('鳯', '鳳')
-    return s.strip()
-
-def clean_date(val):
-    if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == 'nan': 
-        return ""
-    
-    if isinstance(val, (pd.Timestamp, pd.DatetimeIndex)):
-        y = val.year
-        if y < 1920: y += 1911
-        return f"{y:04d}-{val.month:02d}-{val.day:02d}"
-
-    s = str(val).strip().split(' ')[0].split('T')[0].split('.')[0]
-    
-    parts = re.split(r'[/.-]', s)
-    if len(parts) == 3:
-        try:
-            y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            if y < 1000: y += 1911
-            return f"{y:04d}-{m:02d}-{d:02d}"
-        except: pass
-
-    if s.isdigit() and len(s) == 7:
-        y = int(s[:3]) + 1911
-        return f"{y:04d}-{int(s[3:5]):02d}-{int(s[5:7]):02d}"
-    
-    if s.isdigit() and len(s) == 8: 
-        return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
+if file_fa300:
+    try:
+        # 1. 檢查有哪些 Sheet
+        excel_file = pd.ExcelFile(file_fa300)
+        st.write(f"📄 **檔案中的頁籤 (Sheets)**：{excel_file.sheet_names}")
         
-    try:
-        dt = pd.to_datetime(s)
-        if dt.year < 1920: dt = dt.replace(year=dt.year + 1911)
-        return dt.strftime('%Y-%m-%d')
-    except: 
-        return ""
-
-def find_column(df, possible_names):
-    df.columns = [str(c).strip() for c in df.columns]
-    for name in possible_names:
-        if name in df.columns: return name
-    for col in df.columns:
-        for p in possible_names:
-            if p in col: return col
-    return None
-
-def process_fa300(df):
-    col_n = find_column(df, ['個案姓名', '姓名'])
-    col_d = find_column(df, ['服務日期', '日期'])
-    col_c = find_column(df, ['服務項目', '項目'])
-    col_q = find_column(df, ['服務數量', '數量', '次數'])
-
-    cols = df.columns
-    if not col_n: col_n = cols[0]
-    if not col_d: col_d = cols[2]
-    if not col_c: col_c = cols[4]
-    if not col_q: col_q = cols[6] if len(cols) > 6 else None
-
-    df['date'] = df[col_d].apply(clean_date)
-    df['code'] = df[col_c].apply(extract_ba_code)
-    df['name'] = df[col_n].apply(clean_name)
-    
-    # 支援包含 SC 等喘息/短照碼別
-    df = df[df['code'].str.contains(VALID_CODE_PATTERN, na=False)]
-    
-    if col_q:
-        df['qty'] = pd.to_numeric(df[col_q], errors='coerce').fillna(1)
-        return df.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
-    else:
-        return df.groupby(['name', 'date', 'code']).size().reset_index(name='FA300次數')
-
-if file_支審 and file_fa300 and file_dmaker:
-    try:
-        df_支審 = pd.read_excel(file_支審)
-        df_fa300 = pd.read_excel(file_fa300)
-        df_dmaker = pd.read_excel(file_dmaker)
-
-        # 1. 支審
-        col_d_支審 = find_column(df_支審, ['服務日期(請輸入7碼)', '服務日期', '費用日期', '日期'])
-        col_c_支審 = find_column(df_支審, ['服務項目代碼', '服務項目名稱', '服務項目', '項目代碼'])
-        col_n_支審 = find_column(df_支審, ['個案姓名', '姓名', '客戶名'])
-
-        df_支審['date'] = df_支審[col_d_支審].apply(clean_date)
-        df_支審['code'] = df_支審[col_c_支審].apply(extract_ba_code)
-        df_支審['name'] = df_支審[col_n_支審].apply(clean_name)
-        df_支審 = df_支審[df_支審['code'].str.contains(VALID_CODE_PATTERN, na=False)]
-        g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
-
-        # 2. FA300
-        g_fa300 = process_fa300(df_fa300)
-
-        # 3. dmaker
-        col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
-        col_c_dmaker = find_column(df_dmaker, ['品名', '服務項目', '項目代碼'])
-        col_n_dmaker = find_column(df_dmaker, ['客戶名', '個案姓名', '姓名'])
-
-        df_dmaker['date'] = df_dmaker[col_d_dmaker].apply(clean_date)
-        df_dmaker['code'] = df_dmaker[col_c_dmaker].apply(extract_ba_code)
-        df_dmaker['name'] = df_dmaker[col_n_dmaker].apply(clean_name)
-        df_dmaker = df_dmaker[df_dmaker['code'].str.contains(VALID_CODE_PATTERN, na=False)]
-
-        def calculate_dmaker_count(group):
-            is_self = group[col_c_dmaker].astype(str).str.contains('自費|全額|超過').any()
-            raw_len = len(group)
-            if is_self:
-                return raw_len
-            else:
-                return max(1, round(raw_len / 2))
-
-        g_dmaker = df_dmaker.groupby(['name', 'date', 'code']).apply(calculate_dmaker_count).reset_index(name='dmaker次數')
-
-        # 合併三表
-        merged = pd.merge(g_支審, g_fa300, on=['name', 'date', 'code'], how='outer')
-        merged = pd.merge(merged, g_dmaker, on=['name', 'date', 'code'], how='outer')
-
-        merged['支審次數'] = merged['支審次數'].fillna(0).astype(int)
-        merged['FA300次數'] = merged['FA300次數'].fillna(0).astype(int)
-        merged['dmaker次數'] = merged['dmaker次數'].fillna(0).astype(int)
-
-        # 篩選異常資料
-        diff = merged[
-            (merged['支審次數'] != merged['FA300次數']) | 
-            (merged['支審次數'] != merged['dmaker次數'])
-        ].sort_values(by=['date', 'name'])
-
-        diff = diff[diff['date'] != '']
-
-        diff_show = diff.rename(columns={
-            'date': '服務日期',
-            'name': '個案姓名',
-            'code': '服務碼別',
-            '支審次數': '支審次數',
-            'FA300次數': 'FA300次數',
-            'dmaker次數': 'dmaker次數'
-        })[['服務日期', '個案姓名', '服務碼別', '支審次數', 'FA300次數', 'dmaker次數']]
-
-        st.subheader("📌 每日異常項目明細")
-        if len(diff_show) == 0:
-            st.success("🎉 太棒了！每日服務項目與次數完全吻合！")
+        # 讀取第一個 Sheet
+        df = pd.read_excel(file_fa300, sheet_name=0)
+        
+        st.success(f"成功讀取！總共有 **{len(df)}** 行資料，欄位數為 **{len(df.columns)}**")
+        
+        st.subheader("1. 欄位名稱列表：")
+        st.write(list(df.columns))
+        
+        st.subheader("2. 檔案前 10 列實際內容：")
+        st.dataframe(df.head(10))
+        
+        st.subheader("3. 『服務項目』欄位裡面的前 15 筆獨特值：")
+        # 尋找可能包含項目的欄位
+        item_col = None
+        for col in df.columns:
+            if '項目' in str(col) or '碼' in str(col):
+                item_col = col
+                break
+        if item_col:
+            st.write(f"抓取欄位 **【{item_col}】** 的前 15 種不同內容：")
+            st.write(df[item_col].dropna().unique()[:15].tolist())
         else:
-            st.warning(f"⚠️ 發現 {len(diff_show)} 筆差異紀錄：")
-            st.dataframe(diff_show, use_container_width=True)
-
-            @st.cache_data
-            def convert_df(df): return df.to_csv(index=False).encode('utf-8-sig')
-
-            st.download_button("📥 下載異常明細 (CSV)", convert_df(diff_show), "每日服務項目異常明細.csv", "text/csv")
+            st.warning("找不到名稱帶有 '項目' 或 '碼' 的欄位！")
 
     except Exception as e:
-        st.error(f"資料處理失敗：{e}")
+        st.error(f"❌ 讀取檔案時發生致命錯誤：{e}")
