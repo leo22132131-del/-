@@ -9,7 +9,6 @@ file_支審 = st.file_uploader("1. 上傳 支審資料 (Excel)", type=["xlsx", "
 file_fa300 = st.file_uploader("2. 上傳 FA300 (Excel)", type=["xlsx", "xls"])
 file_dmaker = st.file_uploader("3. 上傳 dmaker (Excel)", type=["xlsx", "xls"])
 
-# 正則匹配：抓取所有代碼 (如 GA04, SC03, BB01, BD03 等)
 VALID_CODE_PATTERN = r'([A-Z]{2}\d{2})'
 
 def extract_ba_code(text):
@@ -29,6 +28,7 @@ def clean_date(val):
     if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == 'nan': 
         return ""
     
+    # 若本身就是 Timestamp
     if isinstance(val, (pd.Timestamp, pd.DatetimeIndex)):
         y = val.year
         if y < 1920: y += 1911
@@ -36,7 +36,7 @@ def clean_date(val):
 
     s = str(val).strip().split(' ')[0].split('T')[0].split('.')[0]
     
-    # 處理 115/07/31 或 2026-07-31
+    # 民國/西元 斜線或連字號: 115/07/31, 2026-07-31
     parts = re.split(r'[/.-]', s)
     if len(parts) == 3:
         try:
@@ -45,12 +45,12 @@ def clean_date(val):
             return f"{y:04d}-{m:02d}-{d:02d}"
         except: pass
 
-    # 7碼民國 (1150731)
+    # 7碼純數字民國 (1150731)
     if s.isdigit() and len(s) == 7:
         y = int(s[:3]) + 1911
         return f"{y:04d}-{int(s[3:5]):02d}-{int(s[5:7]):02d}"
     
-    # 8碼西元 (20260731)
+    # 8碼純數字西元 (20260731)
     if s.isdigit() and len(s) == 8: 
         return f"{s[:4]}-{int(s[4:6]):02d}-{int(s[6:8]):02d}"
         
@@ -70,28 +70,47 @@ def find_column(df, possible_names):
             if p in col: return col
     return None
 
-def process_fa300_hardcoded(df):
-    # 依照你的實際截圖，強制精確指定欄位索引：
-    # 0: 個案姓名, 2: 服務日期, 4: 服務項目, 6: 服務數量, 8: 狀態
-    df_clean = pd.DataFrame()
-    df_clean['name'] = df.iloc[:, 0].apply(clean_name)
-    df_clean['date'] = df.iloc[:, 2].apply(clean_date)
-    df_clean['code'] = df.iloc[:, 4].apply(extract_ba_code)
+def process_fa300_smart(df):
+    df.columns = [str(c).strip() for c in df.columns]
     
-    # 數量
-    if df.shape[1] > 6:
-        df_clean['qty'] = pd.to_numeric(df.iloc[:, 6], errors='coerce').fillna(1)
+    # 1. 找個案姓名
+    col_n = '個案姓名' if '個案姓名' in df.columns else find_column(df, ['個案姓名', '姓名', '客戶名'])
+    
+    # 2. 找服務日期（絕對排除身分證與服務人員！）
+    col_d = None
+    for c in df.columns:
+        if '服務日期' in c or (('日期' in c) and ('人員' not in c) and ('身分' not in c)):
+            col_d = c
+            break
+    if not col_d:
+        col_d = df.columns[2] # 備用
+
+    # 3. 找服務項目
+    col_c = '服務項目' if '服務項目' in df.columns else find_column(df, ['服務項目', '項目', '品名'])
+    
+    # 4. 找服務數量
+    col_q = '服務數量' if '服務數量' in df.columns else find_column(df, ['服務數量', '數量', '次數'])
+    
+    # 5. 找狀態
+    col_s = '狀態' if '狀態' in df.columns else find_column(df, ['狀態'])
+
+    # 過濾無效狀態 (取消/作廢/刪除/不核銷)
+    if col_s and col_s in df.columns:
+        df = df[~df[col_s].astype(str).str.contains('取消|作廢|刪除|不核銷|錯誤', na=False)]
+
+    df_clean = pd.DataFrame()
+    df_clean['name'] = df[col_n].apply(clean_name)
+    df_clean['date'] = df[col_d].apply(clean_date)
+    df_clean['code'] = df[col_c].apply(extract_ba_code)
+    
+    if col_q and col_q in df.columns:
+        df_clean['qty'] = pd.to_numeric(df[col_q], errors='coerce').fillna(1)
     else:
         df_clean['qty'] = 1
 
-    # 狀態過濾 (第 9 欄索引 8)
-    if df.shape[1] > 8:
-        status_col = df.iloc[:, 8].astype(str)
-        invalid_mask = status_col.str.contains('取消|作廢|刪除|不核銷|錯誤', na=False)
-        df_clean = df_clean[~invalid_mask]
-
-    # 過濾無效碼與無效日期
-    df_clean = df_clean[(df_clean['code'] != '') & (df_clean['date'] != '')]
+    # 強制檢查：日期必須符合 YYYY-MM-DD (例如 2026-07-31)，剔除任何抓成姓名或身分證號的雜訊
+    df_clean = df_clean[df_clean['date'].str.match(r'^\d{4}-\d{2}-\d{2}$', na=False)]
+    df_clean = df_clean[df_clean['code'] != '']
     
     return df_clean.groupby(['name', 'date', 'code'])['qty'].sum().reset_index(name='FA300次數')
 
@@ -112,8 +131,8 @@ if file_支審 and file_fa300 and file_dmaker:
         df_支審 = df_支審[df_支審['code'] != '']
         g_支審 = df_支審.groupby(['name', 'date', 'code']).size().reset_index(name='支審次數')
 
-        # 2. 整理 FA300 (使用硬鎖定位置法)
-        g_fa300 = process_fa300_hardcoded(df_fa300)
+        # 2. 整理 FA300 (使用智慧防誤抓過濾)
+        g_fa300 = process_fa300_smart(df_fa300)
 
         # 3. 整理 dmaker
         col_d_dmaker = find_column(df_dmaker, ['使用日期', '服務日期', '刷卡日期', '日期'])
