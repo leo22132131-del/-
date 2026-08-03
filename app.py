@@ -7,7 +7,7 @@ st.set_page_config(page_title="長照服務費用三方核對系統", layout="wi
 st.title("📊 長照服務費用三方核對系統")
 st.write("請選擇上傳 **支審資料（日照/居家可單獨或同時上傳）**、**FA300報表** 與 **dmaker報表**，並點擊下方「確定送出交叉比對」按鈕。")
 
-# 1. 檔案上傳區塊 (區分為 4 個區塊)
+# 1. 檔案上傳區塊
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     file_支審_日照 = st.file_uploader("1. 支審資料-日照 (可選)", type=["xls", "xlsx"])
@@ -24,7 +24,6 @@ st.markdown("---")
 submit_btn = st.button("🚀 確定送出交叉比對", type="primary", use_container_width=True)
 
 if submit_btn:
-    # 檢查必填條件：FA300與dmaker為必填，且支審資料(日照或居家)至少需上傳一份
     has_支審 = (file_支審_日照 is not None) or (file_支審_居家 is not None)
     
     if not has_支審:
@@ -36,7 +35,7 @@ if submit_btn:
     else:
         st.success("✅ 檔案檢查無誤，開始執行交叉比對...")
 
-        # 1. 讀取並合併支審資料 (根據上傳的項目動態讀取)
+        # 1. 讀取並合併支審資料
         list_df_支審 = []
         if file_支審_日照:
             list_df_支審.append(pd.read_excel(file_支審_日照))
@@ -47,12 +46,11 @@ if submit_btn:
         df2 = pd.read_excel(file_FA300)
         df3 = pd.read_excel(file_dmaker)
 
-        # 2. 代碼清理與次碼處理（自動清除 -1, -2 等尾綴）
+        # 2. 清理代碼（自動去除尾綴 -1, -2）
         def clean_code(text):
             if pd.isna(text): return ""
             s = str(text).strip()
-            s = re.sub(r'-\d+$', '', s)
-            return s
+            return re.sub(r'-\d+$', '', s)
 
         df1["name"] = df1["個案姓名"].astype(str).str.strip().str.replace("鳯", "鳳")
         df1["code"] = df1["服務項目代碼"].apply(clean_code)
@@ -63,12 +61,18 @@ if submit_btn:
         df3["name"] = df3["客戶名"].astype(str).str.strip().str.replace("鳯", "鳳")
         df3["code"] = df3["品名"].astype(str).str.extract(r"([A-Z]{2}\d{2}|QA1385)")[0].apply(clean_code)
 
-        # 標記 dmaker 類別 (將「公費」與「部分負擔」統一視為政府申報範疇)
+        # 3. 分類 dmaker 服務類型（避免公費與部分負擔重複採計）
         df3["is_self_pay"] = df3["品名"].str.contains("自費", na=False)
-        df3["is_public_or_copay"] = df3["品名"].str.contains("公費|部分負擔", na=False)
+        # 若品名有「公費」，直接採計為公費；若無「公費」但有「部分負擔」（如 BA 居家碼），採計為公費
+        df3["is_public"] = df3["品名"].str.contains("公費", na=False)
+        df3["is_copay"] = df3["品名"].str.contains("部分負擔", na=False)
 
-        # 3. 彙整 dmaker
-        c3_public = df3[df3["is_public_or_copay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_公費次數")
+        # 若同時有公費記錄，優先使用公費記錄；否則使用部分負擔記錄
+        df3_public_only = df3[df3["is_public"]]
+        df3_copay_only = df3[df3["is_copay"] & (~df3["is_public"])]
+        df3_public_combined = pd.concat([df3_public_only, df3_copay_only], ignore_index=True)
+
+        c3_public = df3_public_combined.groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_公費次數")
         c3_self = df3[df3["is_self_pay"]].groupby(["name", "code"])["數量"].sum().reset_index(name="dmaker_自費次數")
 
         dmaker_summary = pd.merge(c3_public, c3_self, on=["name", "code"], how="outer").fillna(0)
