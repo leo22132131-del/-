@@ -46,17 +46,16 @@ if submit_btn:
         df2 = pd.read_excel(file_FA300)
         df3 = pd.read_excel(file_dmaker)
 
-        # 💡 2. 讀取代碼並自動清除尾部的贅符（如底線 _ 或末尾空格）
+        # 2. 讀取代碼並自動清除尾部的贅符（如底線 _ 或末尾空格）
         def get_exact_code(text):
             if pd.isna(text): return ""
             s = str(text).strip()
-            # 抓取基礎代碼組合
             match = re.search(r"([A-Za-z0-9\-_]+)", s)
             code = match.group(1) if match else s
-            # 自動去除結尾的底線 _ 或連字號 -
             code = re.sub(r'[\_\-]+$', '', code)
             return code
 
+        # 人名與代碼基礎清洗
         df1["name"] = df1["個案姓名"].astype(str).str.strip().str.replace("鳯", "鳳")
         df1["code"] = df1["服務項目代碼"].apply(get_exact_code)
 
@@ -83,8 +82,15 @@ if submit_btn:
             lambda r: r["dmaker_公費次數"] if r["dmaker_公費次數"] > 0 else r["dmaker_部分負擔次數"], axis=1
         )
 
-        # 4. 彙整 支審 與 FA300
-        c1 = df1.groupby(["name", "code"]).size().reset_index(name="支審次數")
+        # 💡 4. 彙整支審資料：若有「數量」欄位優先加總「數量」，否則才計算筆數
+        qty_col = [c for c in df1.columns if "數量" in str(c)]
+        if len(qty_col) > 0:
+            df1[qty_col[0]] = pd.to_numeric(df1[qty_col[0]], errors="coerce").fillna(1)
+            c1 = df1.groupby(["name", "code"])[qty_col[0]].sum().reset_index(name="支審次數")
+        else:
+            c1 = df1.groupby(["name", "code"]).size().reset_index(name="支審次數")
+
+        # 彙整 FA300 資料
         c2 = df2.groupby(["name", "code"]).size().reset_index(name="FA300次數")
 
         # 5. 三方 Cross Merge
