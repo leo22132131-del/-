@@ -46,13 +46,16 @@ if submit_btn:
         df2 = pd.read_excel(file_FA300)
         df3 = pd.read_excel(file_dmaker)
 
-        # 💡 2. 保持代碼原貌（不進行歸類與簡化）
+        # 💡 2. 讀取代碼並自動清除尾部的贅符（如底線 _ 或末尾空格）
         def get_exact_code(text):
             if pd.isna(text): return ""
             s = str(text).strip()
-            # 優先提取完整的長照代碼組合（如 BA17d1, BA15-1, QA1385 等）
+            # 抓取基礎代碼組合
             match = re.search(r"([A-Za-z0-9\-_]+)", s)
-            return match.group(1) if match else s
+            code = match.group(1) if match else s
+            # 自動去除結尾的底線 _ 或連字號 -
+            code = re.sub(r'[\_\-]+$', '', code)
+            return code
 
         df1["name"] = df1["個案姓名"].astype(str).str.strip().str.replace("鳯", "鳳")
         df1["code"] = df1["服務項目代碼"].apply(get_exact_code)
